@@ -2940,12 +2940,15 @@ def whole_shard(s: Path) -> bool:
 SHARD_NAME = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$")
 
 
-def gguf_dir_shards(folder: Path, fam: dict, model: str) -> list[Path]:
+def gguf_dir_shards(folder: Path, fam: dict, model: str, first_name: str | None = None) -> list[Path]:
     """--gguf-dir's shards (#305): every -0000i-of-0000N file of the model, N read from the first shard's name as the
     engine and tools/iq_pack.py do.  The published name first; else the one first shard in the folder whose name has
     the size in it (an upload split or named differently: -00001-of-00003, Unsloth's ...-00001-of-00004.gguf).  A
-    missing shard is check_shards' error later, as before."""
-    first = folder / model_file(fam, model, 1)
+    missing shard is check_shards' error later, as before.  first_name: the first file of the set the model question's
+    "I already have the model files" recognised by its header (a renamed or merged file), used before any name."""
+    first = folder / (first_name or model_file(fam, model, 1))
+    if not first.exists():
+        first = folder / model_file(fam, model, 1)
     if not first.exists():
         found = sorted(p for p in folder.glob("*-00001-of-*.gguf") if SHARD_NAME.search(p.name))
         mine = [p for p in found if model.lower() in p.name.lower()]
@@ -3823,9 +3826,9 @@ def family_menu_note(family: str, hip: bool, gpu, avx2: bool = True, avx512: boo
 
 
 def own_files_menu_line(number: int) -> str:
-    """The model list's last answer: the person's own model files, the only answer that downloads no model."""
+    """The model list's last answer: the person's own model files, used where they are."""
     return (f"  {number}) I already have the model files   use the .gguf files you downloaded yourself: setup says "
-            "which model and size they are, and downloads no model")
+            "which model and size they are, and uses them where they are")
 
 
 def own_files_plan(raw: str) -> dict:
@@ -3841,21 +3844,64 @@ def own_files_problem(plan: dict) -> tuple[list[str], list[str]]:
     """(what is wrong, what to do) in plain words, for model files setup cannot install; ([], []) when it can."""
     if plan.get("candidate_selection") and plan.get("file_set_status") == "plausible":
         return [], []
+    arch = (plan.get("metadata") or {}).get("architecture")
+    own = [d for d in OWN_PATH_FAMILIES.values() if d["arch"] == arch]
+    if own:                                    # Qwen3.6's GGUF under another name: plan_import calls it a type Strata cannot run
+        d = own[0]
+        return ([f"setup cannot tell which size of {d['title']} this is: it knows {d['title']}'s files by their "
+                 "published names"],
+                ["Give the file the name of its size (" + ", ".join(d["file"].format(q=m) for m in d["models"]) +
+                 f"), or choose {d['title']} above and let setup download it."])
     wrong = list(plan.get("plain_issues") or [])
     return wrong or ["setup could not tell which model these files are"], list(plan.get("messages") or [])
 
 
+def own_path_match(raw: str, plan: dict) -> tuple | None:
+    """Qwen3.6-35B-A3B's own file (OWN_PATH_FAMILIES): one GGUF of another architecture (qwen35moe), which the import
+    check (Qwen3.8-Flash-Next and DeepSeek) does not know.  install_own_path reads it by its published name, so it is
+    recognised by that name and, where its header was read, its architecture: (family, size, file) when the path is
+    that file or a folder that holds exactly one of them; else None."""
+    from strata_control import models as M
+    path = Path(M.absolute(raw))
+    arch = (plan.get("metadata") or {}).get("architecture")
+    found = []
+    for f, d in OWN_PATH_FAMILIES.items():
+        if arch not in (None, d["arch"]):
+            continue
+        for m in d["models"]:
+            name = d["file"].format(q=m)
+            file = path if path.is_file() else path / name
+            if file.name == name and file.is_file():
+                found.append((f, m, file))
+    return found[0] if len(found) == 1 else None
+
+
+def own_files_fetched(a, family: str, model: str) -> list[tuple[str, int]]:
+    """(name, bytes) of the model's files setup still downloads beside the person's own: DeepSeek-V4.1-Flash's shared
+    files (the n-gram table, the drafter, the metadata shard) that are neither beside them nor in setup's shared folder
+    (install_dsv41 fetches those).  Read-only."""
+    if family not in MULTI_FILE_FAMILIES or not getattr(a, "models_dir", None):
+        return []
+    fam = MULTI_FILE_FAMILIES[family]
+    folder = dsv41_folder(a, fam, fam["tag"] + model, model)
+    shared = dsv41_shared_dir(a, fam)
+    return [(n, DSV41_ALL_FILES[n][0]) for n in fam["models"][model].get("shared", [])
+            if not dsv41_find_shared(a, n, folder, shared).exists()]
+
+
 def own_files_ask(a) -> str | None:
     """The model question's last answer: a folder (or a file) of model files the person already has.  It is checked, and
-    a.family / a.model / a.gguf_dir are set from what it holds, so the rest of setup installs that size from those files
-    and downloads no model (the engine, the draft layer and, for images, the 0.9 GB picture reader come as usual).
+    a.family / a.model / a.gguf_dir (and a.gguf_first, the first file the check recognised) are set from what it holds,
+    so the rest of setup installs that size from those files and downloads no copy of them (the engine, the draft layer
+    and, for images, the 0.9 GB picture reader come as usual; DeepSeek's shared files when they are not beside them).
     Returns the family, or None when the person goes back to the model list."""
     from strata_control import models as M
     say()
     say("  Your own model files: point setup at the folder with the model's .gguf files, or at one of the files.")
     say("  setup reads their names and headers, says which model and size they are, and installs that from where they")
-    say("  are: no model file is downloaded. (The engine, the draft layer and, for images, the picture reader are")
-    say("  fetched as usual.)")
+    say("  are: they are not downloaded or copied. (The engine, the draft layer and, for images, the picture reader are")
+    say("  fetched as usual, and for DeepSeek-V4.1-Flash its shared files, such as the n-gram table, when they are not")
+    say("  beside yours.)")
     while True:
         try:
             typed = input("Folder or file (Enter = back to the list): ").strip().strip('"').strip("'")
@@ -3876,6 +3922,16 @@ def own_files_ask(a) -> str | None:
             say("  Point setup at the folder that holds the model's .gguf files, or at one of them.")
             continue
         wrong, todo = own_files_problem(plan)
+        own = own_path_match(typed, plan) if wrong else None
+        if own:                                        # Qwen3.6-35B-A3B: one file, its own engine path
+            family, model, file = own
+            d = OWN_PATH_FAMILIES[family]
+            a.family, a.model, a.gguf_dir, a.gguf_first = family, model, str(file.parent), None
+            a.own_files = True
+            ok(f"found {d['title']} {model} in {file.parent}")
+            say(f"  1 model file, {file.stat().st_size / 1e9:.1f} GB: setup uses it where it is, and no model file is "
+                "downloaded.")
+            return family
         if wrong:
             for line in wrong:
                 warn(line)
@@ -3885,8 +3941,10 @@ def own_files_ask(a) -> str | None:
             continue
         family, model = plan["candidate_selection"]["family"], plan["candidate_selection"]["model"]
         folder = Path(plan["model_dir"])
-        if family in FAMILIES:                         # setup reads these families' shards by their own names
-            gone = [s.name for s in gguf_dir_shards(folder, FAMILIES[family], model) if not s.exists()]
+        first = None
+        if family in FAMILIES:                         # setup reads these families' shards from the first one's name
+            first = (plan.get("files") or [{}])[0].get("name")      # the set the check recognised, renamed or not
+            gone = [s.name for s in gguf_dir_shards(folder, FAMILIES[family], model, first) if not s.exists()]
             if gone:
                 warn(f"{gone[0]} is not in {folder}")
                 say("  Point setup at the folder where that file is, or choose one of the models above and let setup "
@@ -3894,12 +3952,15 @@ def own_files_ask(a) -> str | None:
                 continue
         title = (FAMILIES[family]["title"] if family in FAMILIES
                  else {**OWN_PATH_FAMILIES, **MULTI_FILE_FAMILIES}[family]["title"])
-        a.family, a.model, a.gguf_dir = family, model, str(folder)
+        a.family, a.model, a.gguf_dir, a.gguf_first = family, model, str(folder), first
         a.own_files = True                             # their files are the size: no size list, and no model download
         files = plan["file_count"]
+        fetched = own_files_fetched(a, family, model)
         ok(f"found {title} {model} in {folder}")
         say(f"  {files} model file{'s' if files != 1 else ''}, {plan['total_bytes'] / 1e9:.1f} GB: setup uses them where "
-            "they are, and no model file is downloaded.")
+            "they are" + (", and no model file is downloaded." if not fetched else
+                          f". Still downloaded, once, into {dsv41_shared_dir(a, MULTI_FILE_FAMILIES[family])}: " +
+                          ", ".join(f"{n} ({b / 1e9:.1f} GB)" for n, b in fetched) + "."))
         for line in plan.get("messages") or []:
             say("  " + line)                      # (the picture readers beside the files are described there)
         return family
@@ -7750,7 +7811,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     if a.model and a.model not in names:
         fail(f"{fam['title']} has no {a.model} model file", "choose one of: " + ", ".join(names))
     say()
-    for i, m in enumerate(names, 1):
+    for i, m in enumerate([] if getattr(a, "own_files", False) else names, 1):   # own files: their size is the choice
         d = fam["models"][m]
         size = fam["sha256"][fam["file"].format(q=m)][0]
         fit = "" if ram >= d["ram_gb"] else f"   <- needs {d['ram_gb']} GB RAM, you have {ram:.0f}"
@@ -7805,7 +7866,8 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     gguf = folder / fam["file"].format(q=model)
     size = fam["sha256"][gguf.name][0]
     part = gguf.with_name(gguf.name + ".part")
-    left = 0 if gguf.exists() and done(gguf) else (size - (part.stat().st_size if part.is_file() else 0)) / 1e9
+    left = 0 if a.gguf_dir or (gguf.exists() and done(gguf)) else \
+        (size - (part.stat().st_size if part.is_file() else 0)) / 1e9       # (--gguf-dir: their file, nothing to fetch)
     if left and free_gb(folder) < left:
         fail(f"not enough free disk space in {folder}: need ~{left:.0f} GB, {free_gb(folder):.0f} GB free", ("use --data-dir on a bigger drive (strata launch --data-dir)" if CONTROL else "use --models-dir on a bigger drive"))
     if left and free_gb(folder) < left + 1:
@@ -7828,24 +7890,26 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
              "update Strata, or compile the engine with --build, and run setup again")
     ok("engine: the engine component (looked up when the model loads)" if CONTROL else f"engine: {eng / EXE}")
 
-    step(5, f"downloading {fam['title']} {model}")
+    step(5, f"the model file: {fam['title']} {model}" if a.gguf_dir else f"downloading {fam['title']} {model}")
     if gguf.exists() and done(gguf):
         ok(f"{gguf.name} already downloaded")
-    else:
-        if a.gguf_dir:
+    elif a.gguf_dir:                                   # the person's own file: it has no finish mark of setup's
+        if not gguf.exists():
             fail(f"{gguf} is missing", f"put {gguf.name} in {folder}, or drop --gguf-dir to download it")
+    else:
         download(fam["hf"] + gguf.name, gguf)
     verify_sha256(gguf, *fam["sha256"][gguf.name], own=bool(a.gguf_dir))
     ok(f"model file: {gguf}")
     mmproj = folder / fam["mmproj"]
+    own_reader = bool(a.gguf_dir) and mmproj.exists()
+    if a.gguf_dir and not own_reader:                  # not beside their file: downloaded into setup's own folder, never theirs
+        mmproj = Path(a.models_dir) / tag / fam["mmproj"]
     if vision != "none":                               # the image encoder: Unsloth's mmproj, pinned, size + SHA-256 checked
-        if mmproj.exists() and done(mmproj):
-            ok(f"{mmproj.name} already downloaded")
+        if mmproj.exists() and (done(mmproj) or own_reader):
+            ok(f"{mmproj.name} in your folder" if own_reader else f"{mmproj.name} already downloaded")
         else:
-            if a.gguf_dir:
-                fail(f"{mmproj} is missing", f"put {mmproj.name} in {folder}, or drop --gguf-dir to download it")
             download(fam["mmproj_hf"] + mmproj.name, mmproj, "vision encoder")
-        verify_sha256(mmproj, *fam["sha256"][mmproj.name], own=bool(a.gguf_dir))
+        verify_sha256(mmproj, *fam["sha256"][mmproj.name], own=own_reader)
         ok(f"vision encoder: {mmproj}")
 
     step(6, "preparing the model for Strata")
@@ -8262,7 +8326,7 @@ def install_dsv41(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopted, 
              + " Or update Strata later (a newer version may add your card), or pick another model. Nothing has been downloaded.")
     ok(f"engine: {exe}")
 
-    step(5, f"downloading {fam['title']} {model}")
+    step(5, f"the model files: {fam['title']} {model}" if a.gguf_dir else f"downloading {fam['title']} {model}")
     for f in shards:
         if f.exists() and done(f):
             ok(f"{f.name} already downloaded")
@@ -9427,9 +9491,11 @@ def main() -> int:
         shards = [ready_where(models_dir, f) for f in ready_files(model)]
     else:
         models_dir = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir) / tag
-        shards = gguf_dir_shards(models_dir, fam, model) if a.gguf_dir else \
+        shards = gguf_dir_shards(models_dir, fam, model, getattr(a, "gguf_first", None)) if a.gguf_dir else \
             [models_dir / model_file(fam, model, i) for i in range(1, model_shards(fam, model) + 1)]
-    problem = gguf_dir_problem(models_dir, shards[0], fam, model) if a.gguf_dir else None
+    # (files the model question recognised by their headers need no guess from their names)
+    problem = gguf_dir_problem(models_dir, shards[0], fam, model) \
+        if a.gguf_dir and not getattr(a, "gguf_first", None) else None
     if problem:                                        # #444: files Strata cannot run, or another choice's files
         fail(*problem)
     if not ready and not a.gguf_dir and not all(sh.exists() and done(sh) for sh in shards):

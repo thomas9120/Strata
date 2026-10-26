@@ -11,6 +11,7 @@ import argparse
 import contextlib
 import importlib.util
 import io
+import struct
 import sys
 import tempfile
 import unittest
@@ -40,6 +41,16 @@ def tiny(folder: Path, names: list[str], experts: list[str]) -> Path:
     for name in names:
         (folder / name).write_bytes(gguf_bytes(experts))
     return folder
+
+
+def arch_gguf(arch: str) -> bytes:
+    """A tiny GGUF of another architecture (Qwen3.6's qwen35moe): its header and no tensors."""
+    header = (b"GGUF" + struct.pack("<IQQ", 3, 0, 1) + _helper.string("general.architecture") + struct.pack("<I", 8)
+              + _helper.string(arch))
+    return header + b"\x00" * (-len(header) % 32)
+
+
+Q36 = "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
 
 
 def quiet(fn, *args, **kw):
@@ -144,6 +155,70 @@ class TheQuestion(unittest.TestCase):
         self.assertEqual((family, a.model, a.gguf_dir), ("deepseek41", "IST-DAS-2.00bpw", str(folder)))
         self.assertIn("This is DeepSeek-V4.1-Flash, 2.00 bpw: all 9 model files are here.", out.getvalue())
 
+    def test_a_deepseek_set_names_the_shared_files_still_downloaded(self):
+        folder = tiny(self.base / "ds", ["any-00001-of-00004.gguf"], ["IQ2_XS"])
+        plan = {"model_dir": str(folder), "file_count": 4, "total_bytes": 1.38e11, "file_set_status": "plausible",
+                "candidate_selection": {"family": "deepseek41", "model": "IST-DAS-2.00bpw"}, "plain_issues": [],
+                "messages": []}
+        engram = setup.DSV41_ISTA_ENGRAM
+
+        def ask(beside):
+            a = argparse.Namespace(family=None, model=None, gguf_dir=None, own_files=False,
+                                   models_dir=str(self.base / "models"))
+            out = io.StringIO()
+            with mock.patch("builtins.input", lambda prompt="": str(folder)), \
+                    mock.patch.object(setup, "own_files_plan", lambda raw: plan), \
+                    mock.patch.dict(setup.DSV41_ALL_FILES, {n: (5, "0" * 64) for n in beside}), \
+                    contextlib.redirect_stdout(out):
+                for n in beside:
+                    (folder / n).write_bytes(b"12345")
+                setup.own_files_ask(a)
+            return out.getvalue()
+
+        out = ask([])
+        self.assertIn("Still downloaded, once, into", out)
+        self.assertIn(f"{engram} (110.6 GB)", out)
+        self.assertIn(f"{setup.DSV41_DSPARK} (8.0 GB)", out)
+        self.assertNotIn("no model file is downloaded", out)
+        shared = setup.MULTI_FILE_FAMILIES["deepseek41"]["models"]["IST-DAS-2.00bpw"]["shared"]
+        out = ask(shared)                                       # all of them beside the person's shards
+        self.assertIn("no model file is downloaded", out)
+        self.assertNotIn("Still downloaded", out)
+
+    def test_a_qwen36_file_goes_to_its_own_installer(self):
+        folder = self.base / "q36"
+        folder.mkdir()
+        (folder / Q36).write_bytes(arch_gguf("qwen35moe"))
+        for typed in (str(folder), str(folder / Q36)):
+            family, out, a, _prompts = self.ask([typed])
+            self.assertEqual((family, a.model, a.gguf_dir, a.own_files), ("qwen36", "UD-Q4_K_XL", str(folder), True))
+            self.assertIn(f"found Qwen3.6-35B-A3B UD-Q4_K_XL in {folder}", out)
+            self.assertNotIn("llama-server", out)
+
+    def test_a_renamed_qwen36_file_is_told_its_published_name_not_llama_server(self):
+        folder = self.base / "q36"
+        folder.mkdir()
+        (folder / "my-qwen.gguf").write_bytes(arch_gguf("qwen35moe"))
+        family, out, _a, _prompts = self.ask([str(folder), ""])
+        self.assertIsNone(family)                               # (Enter: back to the list)
+        self.assertIn("published names", out)
+        self.assertIn(Q36, out)
+        self.assertNotIn("llama-server", out)
+
+    def test_a_set_recognised_by_its_header_is_used_under_its_own_names(self):
+        renamed = ["my-q2-00001-of-00002.gguf", "my-q2-00002-of-00002.gguf"]
+        folder = tiny(self.base / "mine", renamed + ["other-00001-of-00002.gguf", "other-00002-of-00002.gguf"], ["Q2_0"])
+        plan = {"model_dir": str(folder), "file_count": 2, "total_bytes": 2e10, "file_set_status": "plausible",
+                "candidate_selection": {"family": "qwen", "model": "Q2_0"}, "plain_issues": [], "messages": [],
+                "files": [{"name": n} for n in renamed]}
+        a = argparse.Namespace(family=None, model=None, gguf_dir=None, own_files=False)
+        with mock.patch("builtins.input", lambda prompt="": str(folder / renamed[0])), \
+                mock.patch.object(setup, "own_files_plan", lambda raw: plan), contextlib.redirect_stdout(io.StringIO()):
+            family = setup.own_files_ask(a)
+        self.assertEqual((family, a.gguf_first), ("qwen", renamed[0]))
+        shards = setup.gguf_dir_shards(folder, setup.FAMILIES["qwen"], "Q2_0", a.gguf_first)
+        self.assertEqual([s.name for s in shards], renamed)    # not refused for a name setup does not know
+
     def test_enter_goes_back_to_the_model_list(self):
         family, _out, a, prompts = self.ask([""])
         self.assertIsNone(family)
@@ -235,6 +310,19 @@ class Installation(unittest.TestCase):
         self.assertEqual([p.name for p in downloads], [READER])
         self.assertEqual(downloads[0].parent.name, "models")                   # (--models-dir of the test's setup run)
         self.assertFalse((folder / READER).exists())                          # never written into the person's folder
+
+    def test_a_renamed_set_is_packed_from_the_file_the_check_recognised(self):
+        renamed = ["my-q2-00001-of-00002.gguf", "my-q2-00002-of-00002.gguf"]
+        folder = tiny(self.base / "mine", renamed, ["Q2_0"])
+        plan = {"model_dir": str(folder), "file_count": 2, "total_bytes": 2e10, "file_set_status": "plausible",
+                "candidate_selection": {"family": "qwen", "model": "Q2_0"}, "plain_issues": [], "messages": [],
+                "files": [{"name": n} for n in renamed]}
+        code, out, _cfg, _asked, downloads, runs = self.install(
+            folder, extra=[mock.patch.object(setup, "own_files_plan", lambda raw: plan)])
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertNotIn(setup.model_file(setup.FAMILIES["qwen"], "Q2_0", 1), [p.name for p in downloads])
+        pack = next(r for r in runs if any("iq_pack.py" in c for c in r))
+        self.assertEqual(pack[pack.index("--gguf") + 1], str(folder / renamed[0]))
 
     def test_the_disk_space_check_is_the_folder_setup_writes_to_not_theirs(self):        # nothing is written into it
         folder = tiny(self.base / "Q2", Q2, ["Q2_0"])

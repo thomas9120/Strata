@@ -162,6 +162,10 @@ small picture reader (0.9 GB) and the draft layer (5.2 GB) are fetched as usual.
 without the question. A folder that holds several models, or a GGUF Strata cannot run, is named with the reason,
 and setup asks again; nothing of yours is changed or deleted.
 
+Qwen3.6-35B-A3B's file is known by its published name, for example `Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`. For
+DeepSeek-V4.1-Flash, the files its sets share are downloaded once when they are not beside yours: the n-gram table
+(110.6 GB) and the drafter (8.0 GB). Setup names them and their sizes when it recognises your files.
+
 ## Tuning for your PC
 
 Use source setup's `--calibrate` only where that backend supports it. Terminal tuning instead uses
