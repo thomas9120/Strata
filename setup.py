@@ -6,17 +6,21 @@
 The first time it asks four questions - which model (the original Qwen3.8-Flash-Next or the Swift 1.5 fine-tune),
 which size, how much context, and whether the model should also read images - then installs everything and starts the model on http://127.0.0.1:8080 (OpenAI- and Anthropic-compatible
 API; a small page there shows that it runs). Every later start skips straight to running the model: nothing that
-is already downloaded, installed or prepared is done again.
+is already downloaded, installed or prepared is done again. The model question's last answer, "I already have the
+model files", takes a folder (or one file) of .gguf files the person downloaded themselves: setup reads their names
+and headers, says which model and size they are, and installs that from where they are - no model file is downloaded
+(the --gguf-dir option does the same without the question).
 
 What the first run does (each step is skipped when it is already done):
 
   1. checks your PC: NVIDIA or AMD GPU and driver, RAM, CPU, free disk space
-  2. asks the questions
+  2. asks the questions (or takes the .gguf files you already have, and downloads no model)
   3. installs the Python packages it needs into .venv (numpy, jinja2, ..., and NVIDIA's CUDA libraries)
   4. gets the Strata engine: a ready-made build for RTX 20/30/40/50 cards (no compiler needed); if none fits your PC,
      it installs the missing build tools (asks first) and compiles the engine for your GPU.  AMD (--backend hip, chosen by
      itself on a PC with no usable NVIDIA card): the ready-made HIP engine on Windows, compiled here on Linux
-  5. downloads the model from Hugging Face (resumable), and the vision encoder if you want images
+  5. downloads the model from Hugging Face (resumable), and the vision encoder if you want images - skipped for the
+     files you already have, of which only their headers are read and their SHA-256 checked once
   6. prepares the model for Strata and fetches the MTP draft layer (~5 GB, from the original Qwen checkpoint)
   7. writes run-<model>.bat / run-<model>.sh and starts the model
 
@@ -3816,6 +3820,89 @@ def family_menu_note(family: str, hip: bool, gpu, avx2: bool = True, avx512: boo
         return ("   [for PCs with little memory: VRAM + RAM together 27.6 GB (Gyro-S) or 35 GB (Gyro-M)"
                 + ("; AMD is experimental, not for Intel Arc" if hip else "") + "]")
     return ""
+
+
+def own_files_menu_line(number: int) -> str:
+    """The model list's last answer: the person's own model files, the only answer that downloads no model."""
+    return (f"  {number}) I already have the model files   use the .gguf files you downloaded yourself: setup says "
+            "which model and size they are, and downloads no model")
+
+
+def own_files_plan(raw: str) -> dict:
+    """What the model files the person typed are: the checker that stands in front of the app and the Terminal
+    (strata_control.models.plan_import) reads the names and the headers of the folder (or of one file, or of the folder
+    above the model folder) and says which model size they are, with the words for a problem.  Nothing is hashed,
+    copied or downloaded, and no file of theirs is changed."""
+    from strata_control import models as M
+    return M.plan_import(M.absolute(raw))
+
+
+def own_files_problem(plan: dict) -> tuple[list[str], list[str]]:
+    """(what is wrong, what to do) in plain words, for model files setup cannot install; ([], []) when it can."""
+    if plan.get("candidate_selection") and plan.get("file_set_status") == "plausible":
+        return [], []
+    wrong = list(plan.get("plain_issues") or [])
+    return wrong or ["setup could not tell which model these files are"], list(plan.get("messages") or [])
+
+
+def own_files_ask(a) -> str | None:
+    """The model question's last answer: a folder (or a file) of model files the person already has.  It is checked, and
+    a.family / a.model / a.gguf_dir are set from what it holds, so the rest of setup installs that size from those files
+    and downloads no model (the engine, the draft layer and, for images, the 0.9 GB picture reader come as usual).
+    Returns the family, or None when the person goes back to the model list."""
+    from strata_control import models as M
+    say()
+    say("  Your own model files: point setup at the folder with the model's .gguf files, or at one of the files.")
+    say("  setup reads their names and headers, says which model and size they are, and installs that from where they")
+    say("  are: no model file is downloaded. (The engine, the draft layer and, for images, the picture reader are")
+    say("  fetched as usual.)")
+    while True:
+        try:
+            typed = input("Folder or file (Enter = back to the list): ").strip().strip('"').strip("'")
+        except EOFError:
+            fail("input ended before setup got the folder with your model files",
+                 "run setup in a terminal and answer its questions, or pass --gguf-dir DIR with the folder")
+        if not typed:
+            return None
+        problem = M.own_path_problem(typed)
+        if problem:
+            warn(problem[0])
+            say("  " + problem[1])
+            continue
+        try:
+            plan = own_files_plan(typed)
+        except M.ProfileError as e:
+            warn(str(e))
+            say("  Point setup at the folder that holds the model's .gguf files, or at one of them.")
+            continue
+        wrong, todo = own_files_problem(plan)
+        if wrong:
+            for line in wrong:
+                warn(line)
+            for line in todo:
+                say("  " + line)
+            say("  Point setup at the folder that holds that model's .gguf files, or at the path of one of them.")
+            continue
+        family, model = plan["candidate_selection"]["family"], plan["candidate_selection"]["model"]
+        folder = Path(plan["model_dir"])
+        if family in FAMILIES:                         # setup reads these families' shards by their own names
+            gone = [s.name for s in gguf_dir_shards(folder, FAMILIES[family], model) if not s.exists()]
+            if gone:
+                warn(f"{gone[0]} is not in {folder}")
+                say("  Point setup at the folder where that file is, or choose one of the models above and let setup "
+                    f"download {FAMILIES[family]['title']} {model} instead.")
+                continue
+        title = (FAMILIES[family]["title"] if family in FAMILIES
+                 else {**OWN_PATH_FAMILIES, **MULTI_FILE_FAMILIES}[family]["title"])
+        a.family, a.model, a.gguf_dir = family, model, str(folder)
+        a.own_files = True                             # their files are the size: no size list, and no model download
+        files = plan["file_count"]
+        ok(f"found {title} {model} in {folder}")
+        say(f"  {files} model file{'s' if files != 1 else ''}, {plan['total_bytes'] / 1e9:.1f} GB: setup uses them where "
+            "they are, and no model file is downloaded.")
+        for line in plan.get("messages") or []:
+            say("  " + line)                      # (the picture readers beside the files are described there)
+        return family
 
 
 def strix_halo_recommends(gpu, ram) -> bool:
@@ -9039,19 +9126,27 @@ def main() -> int:
     else:
         tier = tier_pick(ram, low_ram_vram(gpu))
         rec_fam = STRIX_HALO_FAMILY if strix_halo_recommends(gpu, ram) and STRIX_HALO_FAMILY in fams else             tier[0] if tier and tier[0] in fams else fams[0]
-        for i, f in enumerate(fams, 1):
-            d = FAMILIES[f]
-            say(f"  {i}) {d['title']:20s} {d['by']} - {d['about']}" + ("   [experimental]" if d.get("experimental") else "")
-                + family_menu_note(f, hip, gpu, avx2, avx512)
-                + (f"   (recommended for Strix Halo: {STRIX_HALO_MODEL})" if f == rec_fam and rec_fam != fams[0] else ""))
-        for j, f in enumerate([*OWN_PATH_FAMILIES, *MULTI_FILE_FAMILIES], len(fams) + 1):   # families with an engine path of their own
-            d = {**OWN_PATH_FAMILIES, **MULTI_FILE_FAMILIES}[f]
-            say(f"  {j}) {d['title']:20s} {d['by']} - {d['about']}   [new]")
         allf = fams + list(OWN_PATH_FAMILIES) + list(MULTI_FILE_FAMILIES)
-        if tier_note(ram, low_ram_vram(gpu)) and rec_fam == "swift":
-            say("  " + tier_note(ram, low_ram_vram(gpu)))
-        family = allf[int(ask("Which model?", [str(i) for i in range(1, len(allf) + 1)],
-                              str(allf.index(rec_fam) + 1), a.yes)) - 1]
+        while True:                                    # the list again when the person's own files turn out unusable
+            for i, f in enumerate(fams, 1):
+                d = FAMILIES[f]
+                say(f"  {i}) {d['title']:20s} {d['by']} - {d['about']}" + ("   [experimental]" if d.get("experimental") else "")
+                    + family_menu_note(f, hip, gpu, avx2, avx512)
+                    + (f"   (recommended for Strix Halo: {STRIX_HALO_MODEL})" if f == rec_fam and rec_fam != fams[0] else ""))
+            for j, f in enumerate([*OWN_PATH_FAMILIES, *MULTI_FILE_FAMILIES], len(fams) + 1):   # families with an engine path of their own
+                d = {**OWN_PATH_FAMILIES, **MULTI_FILE_FAMILIES}[f]
+                say(f"  {j}) {d['title']:20s} {d['by']} - {d['about']}   [new]")
+            say(own_files_menu_line(len(allf) + 1))
+            if tier_note(ram, low_ram_vram(gpu)) and rec_fam == "swift":
+                say("  " + tier_note(ram, low_ram_vram(gpu)))
+            answer = int(ask("Which model?", [str(i) for i in range(1, len(allf) + 2)],
+                             str(allf.index(rec_fam) + 1), a.yes)) - 1
+            if answer < len(allf):
+                family = allf[answer]
+                break
+            family = own_files_ask(a)                  # the files the person already has; None: the list again
+            if family:
+                break
     if family in OWN_PATH_FAMILIES:                    # Qwen3.6: its own engine path, its own steps 2-7
         return install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopted)
     if family in MULTI_FILE_FAMILIES:                  # DeepSeek-V4.1-Flash: nine shards, its own engine, several cards
@@ -9082,26 +9177,27 @@ def main() -> int:
                 if elsewhere_fams else "")
              + (f".\n       {SUPPORTED_GGUFS}" if a.gguf_dir else ""))
     installed = installed_size(family, names, have)
-    for i, m in enumerate(names, 1):
-        d = MODELS[m]
-        fit = "" if ram >= d["ram_gb"] else f"   <- needs {d['ram_gb']} GB RAM, you have {ram:.0f}"
-        if d.get("mem_total"):             # Gyro: the download includes the n-gram table, the memory figure does not
-            have_gb = mem_have(m, ram, gpu["vram_gb"])
-            fit = "" if have_gb >= d["ram_gb"] else \
-                f"   <- needs {d['ram_gb']} GB of VRAM + RAM together, you have {have_gb:.0f}"
-            say(f"  {i}) {m}{size_tag(family, m, installed)} {d['about']}; download {d['download_gb']:.1f} GB "
-                f"(the n-gram table is in the file), memory {d['ram_gb']} GB{fit}")
-            continue
-        if d.get("budget"):
-            keeps = (f"~{resident_budget_gib(m, ram)} GB" if unsloth_budget(m, ram, gpu, a.resident_budget_gib)
-                     else "all")
-            say(f"  {i}) {m}{size_tag(family, m, installed)} {d['about']}; download {d['download_gb']:.0f} GB, keeps {keeps} of its "
-                f"{d['arena_gb']:.0f} GB of experts in RAM{fit}")
-            continue
-        if low_ram_needed(m, ram) and low_ram_fits(m, ram, low_ram_vram(gpu)) and a.low_ram != "off":
-            fit = (f"   <- fits in the low-RAM mode (the GPU holds ~{100 * low_ram_gpu_share(m, low_ram_vram(gpu)):.0f}%, "
-                   + ("the rest in RAM)" if low_ram_resident(m, ram, low_ram_vram(gpu)) else "the rest from the SSD)"))
-        say(f"  {i}) {m:8s}{size_tag(family, m, installed)} {d['about']}; download {d['download_gb']:.0f} GB, uses ~{d['arena_gb']:.0f} GB of RAM{fit}")
+    if not getattr(a, "own_files", False):             # their own files: their size is the choice, no list of downloads
+        for i, m in enumerate(names, 1):
+            d = MODELS[m]
+            fit = "" if ram >= d["ram_gb"] else f"   <- needs {d['ram_gb']} GB RAM, you have {ram:.0f}"
+            if d.get("mem_total"):             # Gyro: the download includes the n-gram table, the memory figure does not
+                have_gb = mem_have(m, ram, gpu["vram_gb"])
+                fit = "" if have_gb >= d["ram_gb"] else \
+                    f"   <- needs {d['ram_gb']} GB of VRAM + RAM together, you have {have_gb:.0f}"
+                say(f"  {i}) {m}{size_tag(family, m, installed)} {d['about']}; download {d['download_gb']:.1f} GB "
+                    f"(the n-gram table is in the file), memory {d['ram_gb']} GB{fit}")
+                continue
+            if d.get("budget"):
+                keeps = (f"~{resident_budget_gib(m, ram)} GB" if unsloth_budget(m, ram, gpu, a.resident_budget_gib)
+                         else "all")
+                say(f"  {i}) {m}{size_tag(family, m, installed)} {d['about']}; download {d['download_gb']:.0f} GB, keeps {keeps} of its "
+                    f"{d['arena_gb']:.0f} GB of experts in RAM{fit}")
+                continue
+            if low_ram_needed(m, ram) and low_ram_fits(m, ram, low_ram_vram(gpu)) and a.low_ram != "off":
+                fit = (f"   <- fits in the low-RAM mode (the GPU holds ~{100 * low_ram_gpu_share(m, low_ram_vram(gpu)):.0f}%, "
+                       + ("the rest in RAM)" if low_ram_resident(m, ram, low_ram_vram(gpu)) else "the rest from the SSD)"))
+            say(f"  {i}) {m:8s}{size_tag(family, m, installed)} {d['about']}; download {d['download_gb']:.0f} GB, uses ~{d['arena_gb']:.0f} GB of RAM{fit}")
     rec = str(names.index(installed or recommended_size(family, names, ram, low_ram_vram(gpu))) + 1)
     model = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)], rec, a.yes)) - 1]
     budget, q4_split = None, False
@@ -9241,15 +9337,18 @@ def main() -> int:
         vision = "none" if vision in ("no", "none") else vision
     else:
         small = 0 < float(gpu.get("vram_gb") or 0.0) < IMAGES_GPU_ENCODER_MIN_VRAM_GB
+        own_reader = bool(a.gguf_dir) and (Path(a.gguf_dir) / fam["mmproj"]).exists()
         say()
-        say("  Images: the model can also read pictures (screenshots, photos, scanned pages). This adds a 0.9 GB")
+        say("  Images: the model can also read pictures (screenshots, photos, scanned pages). " +
+            (f"Your folder has {fam['mmproj']}: nothing is downloaded for it." if own_reader
+             else "This adds a 0.9 GB download."))
         if small:
-            say("  download. On a card under 24 GB the encoder runs on the CPU (a few seconds per picture, nothing taken")
+            say("  On a card under 24 GB the encoder runs on the CPU (a few seconds per picture, nothing taken")
             say("  from the GPU, pictures read at up to 300 tokens; --vision-tokens 1024 for more detail): the GPU")
             say("  encoder keeps ~1.4 GB of VRAM free, which costs 3-5% of text speed on 16 GB cards (measured) and")
             say("  more on some PCs. --vision gpu if you want pictures in under a second.")
         else:
-            say("  download and keeps ~1.4 GB of VRAM free for the image encoder, so text is a few % slower.")
+            say("  The picture reader keeps ~1.4 GB of VRAM free for the image encoder, so text is a few % slower.")
         # on by default wherever the model can read pictures (the reader by the 24 GB rule)
         default = "y" if images_default(model, family, ram, gpu) else "n"
         vision = flash_vision_encoder("yes", gpu) if ask("Do you want images?", ["y", "n"], default, a.yes) == "y" else "none"
@@ -9369,13 +9468,17 @@ def main() -> int:
         (40 if q2_avx and not pack_bin else 0) + (1 if vision != "none" else 0) + \
         (MODELS[model]["arena_gb"] + 1 if low_ram and not q2_avx and not pack_bin else 0)
     need = real + margin
-    free_now = free_gb(models_dir)
+    # own files (--gguf-dir, the model question's last answer): nothing setup writes goes into their folder - the packs,
+    # the draft layer and the picture reader go to the data folder - so the free space that matters is the data folder's
+    space_dir = data if a.gguf_dir else models_dir
+    free_now = free_gb(space_dir)
     if free_now < real:
-        fail(f"not enough free disk space in {models_dir}: need ~{real:.0f} GB, {free_now:.0f} GB free" +
+        fail(f"not enough free disk space in {space_dir}: need ~{real:.0f} GB, {free_now:.0f} GB free" +
              (f" ({on_disk:.0f} GB of the model is already there)" if on_disk >= 1 and not have_model else ""),
-             ("use --data-dir on a bigger drive (strata launch --data-dir)" if CONTROL else "use --models-dir on a bigger drive"))
+             ("use --data-dir on a bigger drive (strata launch --data-dir)" if CONTROL or a.gguf_dir
+              else "use --models-dir on a bigger drive"))
     if free_now < need:
-        warn(f"little free disk space in {models_dir}: {free_now:.0f} GB free for about {real:.0f} GB of files. "
+        warn(f"little free disk space in {space_dir}: {free_now:.0f} GB free for about {real:.0f} GB of files. "
              "Setup goes on and should fit; free up space if it stops")
 
     # ---- 3. python packages
@@ -9406,7 +9509,7 @@ def main() -> int:
     ok("engine: the engine component (looked up when the model loads)" if CONTROL else f"engine: {eng / EXE}")
 
     # ---- 5. the model files
-    step(5, f"downloading {fam['title']} {model}")
+    step(5, f"the model files: {fam['title']} {model}" if a.gguf_dir else f"downloading {fam['title']} {model}")
     if ready:                                          # pinned files of the pack's repository, each SHA-256-checked
         say(f"  The model files go in {models_dir / MODELS[model]['repo'].replace('/', '--')}")
         if model_source() == "modelscope":
