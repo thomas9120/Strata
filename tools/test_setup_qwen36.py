@@ -184,6 +184,32 @@ class InstallOwnPath(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("not enough free disk space", out)
 
+    def test_own_file_is_used_where_it_is_and_the_reader_goes_beside_the_models(self):
+        mine = self.root / "mine"
+        mine.mkdir()
+        gguf = mine / "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+        gguf.write_bytes(b"x")
+        with mock.patch.object(setup, "free_gb", lambda p: 0.1):       # their drive is full: nothing is written to it
+            rc, out = self.install(model="UD-Q4_K_XL", vram=24.0, gguf_dir=str(mine), own_files=True)
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("download 22.9 GB", out)                     # their file is the size: no list of downloads
+        self.assertIn("the model file: Qwen3.6-35B-A3B UD-Q4_K_XL", out)
+        mm = self.root / "models" / "qwen36-UD-Q4_K_XL" / "mmproj-F16.gguf"
+        self.assertEqual([c[2] for c in self.calls if c[0] == "get"], [mm])   # the reader only, never into their folder
+        a = self.cfg["args"]
+        self.assertEqual(a[a.index("--native") + 1], str(gguf))
+        self.assertEqual(self.cfg["vision"]["mmproj"], str(mm))
+
+    def test_own_reader_beside_the_file_is_used(self):
+        mine = self.root / "mine"
+        mine.mkdir()
+        (mine / "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf").write_bytes(b"x")
+        (mine / "mmproj-F16.gguf").write_bytes(b"x")
+        rc, out = self.install(model="UD-Q4_K_XL", vram=24.0, gguf_dir=str(mine), own_files=True)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([c for c in self.calls if c[0] == "get"], [])
+        self.assertEqual(self.cfg["vision"]["mmproj"], str(mine / "mmproj-F16.gguf"))
+
     def test_bigger_card_bigger_context(self):
         rc, out = self.install(model="UD-Q4_K_XL", vram=32.0, vision="no")
         self.assertEqual(rc, 0, out)
