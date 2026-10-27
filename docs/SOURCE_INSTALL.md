@@ -21,7 +21,8 @@ acquire or build an engine. Check [model requirements](MODELS.md) before downloa
 
 1. Clone the [repository](https://github.com/Niko1221/Strata) or download and extract its source archive.
 2. Open the source folder and run `START-HERE.bat`.
-3. Choose a supported model, storage folder and settings. Keep the window open while setup works.
+3. Choose a supported model, storage folder and settings, or answer the model question with **I already have the
+   model files** ([what that answer does](#setups-questions)). Keep the window open while setup works.
 
 For an explicit original ISTA-DASLab Flash-Next pack, from Command Prompt in that folder:
 
@@ -165,6 +166,17 @@ Setup detects the machine and offers compatible choices. The list varies by plat
 catalog; it is not a fixed two-model menu. Read the proposed download, memory use and settings before accepting.
 For documentation recommendations, prefer ISTA-DASLab when a compatible pack fits, then Unsloth, Gyro and others.
 Executable defaults may differ, so select the family explicitly when that choice matters.
+
+The model question's last answer is **I already have the model files**. Give setup the folder with the model's
+`.gguf` files, or one of the files. It reads their names and headers only, says which model and size they are, and
+installs that size from where the files are: no model file is downloaded and nothing is copied. The engine, the
+small picture reader (0.9 GB) and the draft layer (5.2 GB) are fetched as usual. `--gguf-dir DIR` does the same
+without the question. A folder that holds several models, or a GGUF Strata cannot run, is named with the reason,
+and setup asks again; nothing of yours is changed or deleted.
+
+Qwen3.6-35B-A3B's file is known by its published name, for example `Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`. For
+DeepSeek-V4.1-Flash, the files its sets share are downloaded once when they are not beside yours: the n-gram table
+(110.6 GB) and the drafter (8.0 GB). Setup names them and their sizes when it recognises your files.
 
 ## Tuning for your PC
 
