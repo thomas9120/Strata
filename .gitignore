@@ -90,3 +90,9 @@ node_modules/
 /apps/host/docs/evidence/
 /apps/host/docs/checkpoints/
 /engine-feed
+
+# DGX Spark build outputs and local venv (docs/DGX_SPARK_LINUX.md)
+/out-spark/
+/build-spark/
+/build-vision-spark/
+/.venv-build/
